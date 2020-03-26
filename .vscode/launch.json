@@ -22,8 +22,10 @@
                     "ignoreFailures": true
                 }
             ],
+            // "coreDumpPath": "${fileDirname}",
             "preLaunchTask": "common build",
-            "miDebuggerPath": "/usr/bin/gdb"
+            "miDebuggerPath": "/usr/bin/gdb",
+            // "miDebuggerArgs": "-d /usr/src/glibc /usr/include"
         }
     ]
 }

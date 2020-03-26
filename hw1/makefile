@@ -1,13 +1,13 @@
 CXX = g++
-FLAG = -g -Wall
+FLAG = -g -Wall -std=c++14
 
 .PHONY: all clean install
 
 all: hw1.o
-	$(CXX) $(FLAG) -o hw1 $^
+	$(CXX) $^ $(FLAG) -o hw1 
 
 %.o: %.cpp
-	$(CXX) -c $^
+	$(CXX) $^ $(FLAG) -c 
 
 clean:
 	rm *.o

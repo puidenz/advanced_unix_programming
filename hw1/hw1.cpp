@@ -3,6 +3,8 @@
 #include<sstream>
 #include<fstream>
 #include<vector>
+#include<unordered_map>
+#include<iomanip>
 
 #include<cstring>
 #include<cstdlib>
@@ -10,6 +12,9 @@
 
 #include<arpa/inet.h>
 #include<netinet/in.h>
+#include<sys/types.h>
+#include<dirent.h>
+#include<unistd.h>
 
 #define IPV4 32
 #define IPV6 128
@@ -26,20 +31,18 @@ class netstat_entry{
         string local_address;
         string remote_address;
 
-        int pid;
+        string pid;
+        unsigned int inode;
         string program;
 
         netstat_entry(){
             type = "NULL";
             local_address = "NULL";
             remote_address = "NULL";
-            pid = -1;
+            inode = 0;
+            pid = "-1";
             program = "NULL";
         }
-};
-
-struct my_in6_addr{
-    long long ipv6_addr;
 };
 
 void output_if_err(bool err, string err_msg){
@@ -47,9 +50,17 @@ void output_if_err(bool err, string err_msg){
         cerr << err_msg << ": " << strerror(errno) << endl;
 }
 void read_netstat_entry(vector<netstat_entry> &netstat_table, ifstream &netstat_file, string type);
-void print_netstat_entry(const vector<netstat_entry> &netstat_table);
+void print_netstat_table(const vector<netstat_entry> &netstat_table);
+void parse_processes(vector<netstat_entry> &netstat_table, string path);
+
 vector<char> hexstr_to_byte(string hex_string);
 string address_ntop (string network_style_address, unsigned short int ip_type);
+
+int filter_inode(string link_content);
+bool is_digit(string str);
+bool is_socket_link(string str);
+
+unordered_map<unsigned int, int> inode_table;
 
 int main(){
     ifstream tcp_file, udp_file;
@@ -65,19 +76,27 @@ int main(){
     tcp_file.open(TCP6_FILE, ios::in);
     output_if_err(!tcp_file.is_open(), "TCP6 file open error");
     read_netstat_entry(tcp_table, tcp_file, "tcp6");
-    print_netstat_entry(tcp_table);
     tcp_file.close();
+    
+    parse_processes(tcp_table, "/proc");
+    print_netstat_table(tcp_table);
+    inode_table.clear();
 
-    cout << endl << "List of TCP connections:" << endl;
+
+    cout << endl << "List of UCP connections:" << endl;
     udp_file.open(UDP_FILE, ios::in);
     output_if_err(!udp_file.is_open(), "UDP file open error");
     read_netstat_entry(udp_table, udp_file, "udp");
     udp_file.close();
+
     udp_file.open(UDP6_FILE, ios::in);
     output_if_err(!udp_file.is_open(), "UDP6 file open error");
     read_netstat_entry(udp_table, udp_file, "udp6");
-    print_netstat_entry(udp_table);
     udp_file.close();
+
+    parse_processes(udp_table, "/proc");
+    print_netstat_table(udp_table);
+    
 }
 
 void read_netstat_entry(vector<netstat_entry> &netstat_table, ifstream &netstat_file, string type){
@@ -113,11 +132,15 @@ void read_netstat_entry(vector<netstat_entry> &netstat_table, ifstream &netstat_
                     else
                         output_if_err(true, "Invaild type");
                     break;
+                case 9:
+                    tmp_entry.inode = strtol(tmp.c_str(), NULL, 10);
+                    break;
             }
         }
-        netstat_table.push_back(tmp_entry);
+        inode_table[tmp_entry.inode] = netstat_table.size();    //netstat_table.size() = index of incoming element
+        netstat_table.push_back(tmp_entry); 
     }
-}
+ }
 
 // net formate -> printable format
 string address_ntop (string network_style_address, unsigned short int ip_type){
@@ -134,11 +157,14 @@ string address_ntop (string network_style_address, unsigned short int ip_type){
         printable_ip = string(printable_ipv4);
     }
     else if(ip_type == IPV6){
-        // struct in6_addr ip_bytes;
+        struct in6_addr ip_bytes;
         
-        // ip_bytes.ipv6_addr = strtol(network_style_ip.c_str(), NULL, 16);
+        for(unsigned int pos=0; pos<network_style_ip.size(); pos+=8)
+            ip_bytes.__in6_u.__u6_addr32[pos/8] = strtol(network_style_ip.substr(pos, 8).c_str(), NULL, 16);
+        
         char printable_ipv6[INET6_ADDRSTRLEN];
-        inet_ntop(AF_INET6, hexstr_to_byte(network_style_ip).data(), printable_ipv6, INET6_ADDRSTRLEN);
+        inet_ntop(AF_INET6, &ip_bytes, printable_ipv6, INET6_ADDRSTRLEN);
+        // inet_ntop(AF_INET6, hexstr_to_byte(network_style_ip).data(), printable_ipv6, INET6_ADDRSTRLEN);
         printable_ip = string(printable_ipv6);
     }
     
@@ -164,11 +190,79 @@ vector<char> hexstr_to_byte(string hex_string){
     return bytes;
 }
 
-void print_netstat_entry(const vector<netstat_entry> &netstat_table){
-    string header = "Proto\tLocal Address\tForeign Address\tPID/Program name and arguments";
-    cout << header << endl;
+void print_netstat_table(const vector<netstat_entry> &netstat_table){
+    cout.setf(ios::left);
+    //print header
+    cout << setw(7) << "Proto" << setw(35) << "Local Address" \
+    << setw(35) << "Foreign Address" << "PID/Program name and arguments" << endl;
+    
+    //print content
     for(auto entry : netstat_table){
-        cout << entry.type << "\t" << entry.local_address << "\t" << entry.remote_address << "\t" \
+        cout << setw(7) << entry.type << setw(35) << entry.local_address << setw(35) << entry.remote_address \
         << entry.pid << "/" << entry.program << endl;
     }
+}
+
+void parse_processes(vector<netstat_entry> &netstat_table, string path){
+    DIR *procs_dir = opendir(path.c_str());
+    while(struct dirent *proc = readdir(procs_dir)){
+        if( is_digit(string(proc->d_name)) ){
+            string fd_path = path + "/" + string(proc->d_name) + "/fd";
+            DIR* fd_dir = opendir(fd_path.c_str());
+            if(fd_dir == NULL){
+                output_if_err(fd_dir == NULL, "Open dir error - " + fd_path);
+                continue;
+            }
+
+            char buf[1024];
+            while(struct dirent *fd = readdir(fd_dir)){
+                memset(buf, 0, 1024);
+                string link_path = fd_path + "/" + string(fd->d_name);
+                
+                if(readlink(link_path.c_str(), buf, 1024) < 0){
+                    // output_if_err(true, "Read link fail");
+                    continue;
+                }
+
+                string link_content = buf;
+                if(!is_socket_link(link_content))
+                    continue;
+
+                int inode = filter_inode(link_content);
+                unordered_map<unsigned int, int>::iterator it = inode_table.find(inode); 
+                if(it == inode_table.end())
+                    continue;
+                netstat_table[it->second].pid = string(proc->d_name);
+                
+                string cmd_path = "/proc/" + string(proc->d_name) + "/cmdline";
+                ifstream cmd_file;
+                cmd_file.open(cmd_path.c_str());
+                string command;
+                getline(cmd_file, command);
+                netstat_table[it->second].program = command.substr(command.find_last_of("/")+1);
+            }
+        }
+    }
+}
+
+bool is_digit(string str){
+    return strtol(str.c_str(), NULL, 10);
+}
+
+bool is_socket_link(string str){
+    return str.find("socket:[") != string::npos || str.find("[0000]:") != string::npos;
+}
+
+int filter_inode(string link_content){
+    size_t pos_first;
+    if((pos_first = link_content.find("socket:[")) != string::npos){
+        string inode_str = link_content.substr(sizeof("socket:[")-1, link_content.find("]"));
+        return strtol(inode_str.c_str(), NULL, 10);
+    }else if((pos_first = link_content.find("[0000]:")) != string::npos){
+        string inode_str = link_content.substr(sizeof("[0000]:")-1, link_content.find("]", sizeof("[0000]:")-1));
+        return strtol(inode_str.c_str(), NULL, 10);
+    }else{
+        output_if_err(true, "Wired link content");
+    }
+    return 0;
 }
