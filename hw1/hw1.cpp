@@ -5,6 +5,7 @@
 #include<vector>
 #include<unordered_map>
 #include<iomanip>
+#include<regex>
 
 #include<cstring>
 #include<cstdlib>
@@ -15,6 +16,7 @@
 #include<sys/types.h>
 #include<dirent.h>
 #include<unistd.h>
+#include<getopt.h>
 
 #define IPV4 32
 #define IPV6 128
@@ -40,8 +42,8 @@ class netstat_entry{
             local_address = "NULL";
             remote_address = "NULL";
             inode = 0;
-            pid = "-1";
-            program = "NULL";
+            pid = "-";
+            program = "";
         }
 };
 
@@ -50,10 +52,12 @@ void output_if_err(bool err, string err_msg){
         cerr << err_msg << ": " << strerror(errno) << endl;
 }
 void read_netstat_entry(vector<netstat_entry> &netstat_table, ifstream &netstat_file, string type);
-void print_netstat_table(const vector<netstat_entry> &netstat_table);
+void print_netstat_table(const vector<netstat_entry> &netstat_table, regex rex);
 void parse_processes(vector<netstat_entry> &netstat_table, string path);
 
 vector<char> hexstr_to_byte(string hex_string);
+unordered_map <string, bool> parse_flag(int argc, char *argv[]);
+string parse_rex(int argc, char *argv[]);
 string address_ntop (string network_style_address, unsigned short int ip_type);
 
 int filter_inode(string link_content);
@@ -62,41 +66,66 @@ bool is_socket_link(string str);
 
 unordered_map<unsigned int, int> inode_table;
 
-int main(){
+
+int main(int argc, char *argv[]){
     ifstream tcp_file, udp_file;
-    string tmp;
     vector<netstat_entry> tcp_table, udp_table;
 
-    cout << "List of TCP connections:" << endl;
-    tcp_file.open(TCP_FILE, ios::in);
-    read_netstat_entry(tcp_table, tcp_file, "tcp");
-    output_if_err(!tcp_file.is_open(), "TCP file open error");
-    tcp_file.close();
+    regex rex;
+    try{
+        rex.assign(parse_rex(argc, argv));
+    }catch (const regex_error& e) {
+        std::cout << "regex_error caught: " << e.what() << endl;
+        if (e.code() == std::regex_constants::error_brack)
+            std::cout << "The code was error_brack\n";
+    }
 
-    tcp_file.open(TCP6_FILE, ios::in);
-    output_if_err(!tcp_file.is_open(), "TCP6 file open error");
-    read_netstat_entry(tcp_table, tcp_file, "tcp6");
-    tcp_file.close();
-    
-    parse_processes(tcp_table, "/proc");
-    print_netstat_table(tcp_table);
-    inode_table.clear();
+    const struct option opts[] = {
+        {"tcp", 0, NULL, 't'},
+        {"udp", 0, NULL, 'u'},
+        {0, 0, 0, 0}
+    };
 
+    const char optstring[] = "tu";
+    int c;
+    while((c = getopt_long(argc, argv, optstring, opts, NULL)) != -1){
+        switch(c){
+            case 't':
+                cout << "List of TCP connections:" << endl;
+                tcp_file.open(TCP_FILE, ios::in);
+                read_netstat_entry(tcp_table, tcp_file, "tcp");
+                output_if_err(!tcp_file.is_open(), "TCP file open error");
+                tcp_file.close();
 
-    cout << endl << "List of UCP connections:" << endl;
-    udp_file.open(UDP_FILE, ios::in);
-    output_if_err(!udp_file.is_open(), "UDP file open error");
-    read_netstat_entry(udp_table, udp_file, "udp");
-    udp_file.close();
+                tcp_file.open(TCP6_FILE, ios::in);
+                output_if_err(!tcp_file.is_open(), "TCP6 file open error");
+                read_netstat_entry(tcp_table, tcp_file, "tcp6");
+                tcp_file.close();
+                
+                parse_processes(tcp_table, "/proc");
+                print_netstat_table(tcp_table, rex);
+                inode_table.clear();
+            break;
+            case 'u':
+                cout << endl << "List of UCP connections:" << endl;
+                udp_file.open(UDP_FILE, ios::in);
+                output_if_err(!udp_file.is_open(), "UDP file open error");
+                read_netstat_entry(udp_table, udp_file, "udp");
+                udp_file.close();
 
-    udp_file.open(UDP6_FILE, ios::in);
-    output_if_err(!udp_file.is_open(), "UDP6 file open error");
-    read_netstat_entry(udp_table, udp_file, "udp6");
-    udp_file.close();
+                udp_file.open(UDP6_FILE, ios::in);
+                output_if_err(!udp_file.is_open(), "UDP6 file open error");
+                read_netstat_entry(udp_table, udp_file, "udp6");
+                udp_file.close();
 
-    parse_processes(udp_table, "/proc");
-    print_netstat_table(udp_table);
-    
+                parse_processes(udp_table, "/proc");
+                print_netstat_table(udp_table, rex);
+            break;
+            case '?':
+                output_if_err(true, "Unknown opotion");
+            break;
+        }
+    }
 }
 
 void read_netstat_entry(vector<netstat_entry> &netstat_table, ifstream &netstat_file, string type){
@@ -190,7 +219,7 @@ vector<char> hexstr_to_byte(string hex_string){
     return bytes;
 }
 
-void print_netstat_table(const vector<netstat_entry> &netstat_table){
+void print_netstat_table(const vector<netstat_entry> &netstat_table, regex rex){
     cout.setf(ios::left);
     //print header
     cout << setw(7) << "Proto" << setw(35) << "Local Address" \
@@ -198,8 +227,15 @@ void print_netstat_table(const vector<netstat_entry> &netstat_table){
     
     //print content
     for(auto entry : netstat_table){
-        cout << setw(7) << entry.type << setw(35) << entry.local_address << setw(35) << entry.remote_address \
-        << entry.pid << "/" << entry.program << endl;
+        if(regex_search(entry.type, rex) || regex_search(entry.local_address, rex) || regex_search(entry.remote_address, rex) || \
+        regex_search(entry.pid, rex) || regex_search(entry.program, rex)){
+            cout << setw(7) << entry.type << setw(35) << entry.local_address << setw(35) << entry.remote_address << entry.pid;
+
+            if(!entry.program.empty())
+                cout << "/" << entry.program << endl;
+            else
+                cout << endl;
+        }
     }
 }
 
@@ -210,7 +246,7 @@ void parse_processes(vector<netstat_entry> &netstat_table, string path){
             string fd_path = path + "/" + string(proc->d_name) + "/fd";
             DIR* fd_dir = opendir(fd_path.c_str());
             if(fd_dir == NULL){
-                output_if_err(fd_dir == NULL, "Open dir error - " + fd_path);
+                // output_if_err(fd_dir == NULL, "Open dir error - " + fd_path);
                 continue;
             }
 
@@ -265,4 +301,22 @@ int filter_inode(string link_content){
         output_if_err(true, "Wired link content");
     }
     return 0;
+}
+
+unordered_map <string, bool> parse_flag(int argc, char *argv[]){
+    unordered_map <string, bool> flags;
+    for(int arg_index=0; arg_index<argc; arg_index++){
+        if(argv[arg_index][0] != '-')
+            continue;
+        flags[string(argv[arg_index])] = true;
+    }
+    return flags;
+}
+
+string parse_rex(int argc, char *argv[]){
+    for(int arg_index=1; arg_index<argc; arg_index++){
+        if(argv[arg_index][0] != '-')
+            return string(argv[arg_index]);
+    }
+    return ".*";
 }
