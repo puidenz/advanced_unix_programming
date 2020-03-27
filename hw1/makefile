@@ -11,3 +11,4 @@ all: hw1.o
 
 clean:
 	rm *.o
+	rm hw1
